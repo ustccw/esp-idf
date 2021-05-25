@@ -21,17 +21,27 @@
 
 //32-bit alignment macros
 #define rbALIGN_SIZE( xSize )       ( ( xSize + portBYTE_ALIGNMENT_MASK ) & ~portBYTE_ALIGNMENT_MASK )
-#define rbCHECK_ALIGNED( pvPtr )    ( ( ( UBaseType_t ) pvPtr & portBYTE_ALIGNMENT_MASK ) == 0 )
+#define rbCHECK_ALIGNED( pvPtr )    ( ( ( UBaseType_t ) ( pvPtr ) & portBYTE_ALIGNMENT_MASK ) == 0 )
 
 //Ring buffer flags
 #define rbALLOW_SPLIT_FLAG          ( ( UBaseType_t ) 1 )   //The ring buffer allows items to be split
 #define rbBYTE_BUFFER_FLAG          ( ( UBaseType_t ) 2 )   //The ring buffer is a byte buffer
 #define rbBUFFER_FULL_FLAG          ( ( UBaseType_t ) 4 )   //The ring buffer is currently full (write pointer == free pointer)
+#define rbBUFFER_STATIC_FLAG        ( ( UBaseType_t ) 8 )   //The ring buffer is statically allocated
 
 //Item flags
 #define rbITEM_FREE_FLAG            ( ( UBaseType_t ) 1 )   //Item has been retrieved and returned by application, free to overwrite
 #define rbITEM_DUMMY_DATA_FLAG      ( ( UBaseType_t ) 2 )   //Data from here to end of the ring buffer is dummy data. Restart reading at start of head of the buffer
 #define rbITEM_SPLIT_FLAG           ( ( UBaseType_t ) 4 )   //Valid for RINGBUF_TYPE_ALLOWSPLIT, indicating that rest of the data is wrapped around
+
+//Static allocation related
+#if ( configSUPPORT_STATIC_ALLOCATION == 1 )
+#define rbGET_TX_SEM_HANDLE( pxRingbuffer ) ( (SemaphoreHandle_t) &(pxRingbuffer->xTransSemStatic) )
+#define rbGET_RX_SEM_HANDLE( pxRingbuffer ) ( (SemaphoreHandle_t) &(pxRingbuffer->xRecvSemStatic) )
+#else
+#define rbGET_TX_SEM_HANDLE( pxRingbuffer ) ( pxRingbuffer->xTransSemHandle )
+#define rbGET_RX_SEM_HANDLE( pxRingbuffer ) ( pxRingbuffer->xRecvSemHandle )
+#endif
 
 typedef struct {
     //This size of this structure must be 32-bit aligned
@@ -40,7 +50,7 @@ typedef struct {
 } ItemHeader_t;
 
 #define rbHEADER_SIZE     sizeof(ItemHeader_t)
-typedef struct Ringbuffer_t Ringbuffer_t;
+typedef struct RingbufferDefinition Ringbuffer_t;
 typedef BaseType_t (*CheckItemFitsFunction_t)(Ringbuffer_t *pxRingbuffer, size_t xItemSize);
 typedef void (*CopyItemFunction_t)(Ringbuffer_t *pxRingbuffer, const uint8_t *pcItem, size_t xItemSize);
 typedef BaseType_t (*CheckItemAvailFunction_t) (Ringbuffer_t *pxRingbuffer);
@@ -48,10 +58,10 @@ typedef void *(*GetItemFunction_t)(Ringbuffer_t *pxRingbuffer, BaseType_t *pxIsS
 typedef void (*ReturnItemFunction_t)(Ringbuffer_t *pxRingbuffer, uint8_t *pvItem);
 typedef size_t (*GetCurMaxSizeFunction_t)(Ringbuffer_t *pxRingbuffer);
 
-struct Ringbuffer_t {
+typedef struct RingbufferDefinition {
     size_t xSize;                               //Size of the data storage
-    UBaseType_t uxRingbufferFlags;              //Flags to indicate the type and status of ring buffer
     size_t xMaxItemSize;                        //Maximum item size
+    UBaseType_t uxRingbufferFlags;              //Flags to indicate the type and status of ring buffer
 
     CheckItemFitsFunction_t xCheckItemFits;     //Function to check if item can currently fit in ring buffer
     CopyItemFunction_t vCopyItem;               //Function to copy item to ring buffer
@@ -66,10 +76,31 @@ struct Ringbuffer_t {
     uint8_t *pucTail;                           //Pointer to the end of the ring buffer storage area
 
     BaseType_t xItemsWaiting;                   //Number of items/bytes(for byte buffers) currently in ring buffer that have not yet been read
-    SemaphoreHandle_t xFreeSpaceSemaphore;      //Binary semaphore, wakes up writing threads when more free space becomes available or when another thread times out attempting to write
-    SemaphoreHandle_t xItemsBufferedSemaphore;  //Binary semaphore, indicates there are new packets in the circular buffer. See remark.
+    /*
+     * TransSem: Binary semaphore used to indicate to a blocked transmitting tasks
+     *           that more free space has become available or that the block has
+     *           timed out.
+     *
+     * RecvSem: Binary semaphore used to indicate to a blocked receiving task that
+     *          new data/item has been written to the ring buffer.
+     *
+     * Note - When static allocation is enabled, the two semaphores are always
+     *        statically stored in the ring buffer's control structure
+     *        regardless of whether the ring buffer is allocated dynamically or
+     *        statically. When static allocation is disabled, the two semaphores
+     *        are allocated dynamically and their handles stored instead, thus
+     *        making the ring buffer's control structure slightly smaller when
+     *        static allocation is disabled.
+     */
+#if ( configSUPPORT_STATIC_ALLOCATION == 1 )
+    StaticSemaphore_t xTransSemStatic;
+    StaticSemaphore_t xRecvSemStatic;
+#else
+    SemaphoreHandle_t xTransSemHandle;
+    SemaphoreHandle_t xRecvSemHandle;
+#endif
     portMUX_TYPE mux;                           //Spinlock required for SMP
-};
+} Ringbuffer_t;
 
 /*
 Remark: A counting semaphore for items_buffered_sem would be more logical, but counting semaphores in
@@ -84,6 +115,10 @@ which is quite high and so would waste a fair amount of memory.
  * ARE NOT THREAD SAFE. Therefore they should only be called within a critical
  * section (using spin locks)
  */
+
+
+//Initialize a ring buffer after space has been allocated for it
+static void prvInitializeNewRingbuffer(size_t xBufferSize, RingbufferType_t xBufferType, Ringbuffer_t *pxNewRingbuffer, uint8_t *pucRingbufferStorage);
 
 //Calculate current amount of free space (in bytes) in the ring buffer
 static size_t prvGetFreeSize(Ringbuffer_t *pxRingbuffer);
@@ -110,7 +145,7 @@ static void prvCopyItemByteBuf(Ringbuffer_t *pxRingbuffer, const uint8_t *pucIte
 static void *prvGetItemDefault(Ringbuffer_t *pxRingbuffer, BaseType_t *pxIsSplit, size_t xUnusedParam, size_t *pxItemSize);
 
 //Retrieve data from byte buffer. If xMaxSize is 0, all continuous data is retrieved
-static void *prvGetItemByteBuf(Ringbuffer_t *pxRingbuffer, BaseType_t *pxUnusedParam ,size_t xMaxSize,  size_t *pxItemSize);
+static void *prvGetItemByteBuf(Ringbuffer_t *pxRingbuffer, BaseType_t *pxUnusedParam, size_t xMaxSize,  size_t *pxItemSize);
 
 //Return an item to a split/no-split ring buffer
 static void prvReturnItemDefault(Ringbuffer_t *pxRingbuffer, uint8_t *pucItem);
@@ -138,7 +173,54 @@ static BaseType_t prvReceiveGeneric(Ringbuffer_t *pxRingbuffer, void **pvItem1, 
 //Generic function used to retrieve an item/data from ring buffers in an ISR
 static BaseType_t prvReceiveGenericFromISR(Ringbuffer_t *pxRingbuffer, void **pvItem1, void **pvItem2, size_t *xItemSize1, size_t *xItemSize2, size_t xMaxSize);
 
-/* ------------------------------------------------ Static Definitions ------------------------------------------- */
+/* --------------------------- Static Definitions --------------------------- */
+
+static void prvInitializeNewRingbuffer(size_t xBufferSize, RingbufferType_t xBufferType, Ringbuffer_t *pxNewRingbuffer, uint8_t *pucRingbufferStorage)
+{
+    //Initialize values
+    pxNewRingbuffer->xSize = xBufferSize;
+    pxNewRingbuffer->pucHead = pucRingbufferStorage;
+    pxNewRingbuffer->pucTail = pucRingbufferStorage + xBufferSize;
+    pxNewRingbuffer->pucFree = pucRingbufferStorage;
+    pxNewRingbuffer->pucRead = pucRingbufferStorage;
+    pxNewRingbuffer->pucWrite = pucRingbufferStorage;
+    pxNewRingbuffer->xItemsWaiting = 0;
+    pxNewRingbuffer->uxRingbufferFlags = 0;
+
+    //Initialize type dependent values and function pointers
+    if (xBufferType == RINGBUF_TYPE_NOSPLIT) {
+        pxNewRingbuffer->xCheckItemFits = prvCheckItemFitsDefault;
+        pxNewRingbuffer->vCopyItem = prvCopyItemNoSplit;
+        pxNewRingbuffer->pvGetItem = prvGetItemDefault;
+        pxNewRingbuffer->vReturnItem = prvReturnItemDefault;
+        /*
+         * Worst case scenario is when the read/write/free pointers are all
+         * pointing to the halfway point of the buffer.
+         */
+        pxNewRingbuffer->xMaxItemSize = rbALIGN_SIZE(pxNewRingbuffer->xSize / 2) - rbHEADER_SIZE;
+        pxNewRingbuffer->xGetCurMaxSize = prvGetCurMaxSizeNoSplit;
+    } else if (xBufferType == RINGBUF_TYPE_ALLOWSPLIT) {
+        pxNewRingbuffer->uxRingbufferFlags |= rbALLOW_SPLIT_FLAG;
+        pxNewRingbuffer->xCheckItemFits = prvCheckItemFitsDefault;
+        pxNewRingbuffer->vCopyItem = prvCopyItemAllowSplit;
+        pxNewRingbuffer->pvGetItem = prvGetItemDefault;
+        pxNewRingbuffer->vReturnItem = prvReturnItemDefault;
+        //Worst case an item is split into two, incurring two headers of overhead
+        pxNewRingbuffer->xMaxItemSize = pxNewRingbuffer->xSize - (sizeof(ItemHeader_t) * 2);
+        pxNewRingbuffer->xGetCurMaxSize = prvGetCurMaxSizeAllowSplit;
+    } else { //Byte Buffer
+        pxNewRingbuffer->uxRingbufferFlags |= rbBYTE_BUFFER_FLAG;
+        pxNewRingbuffer->xCheckItemFits = prvCheckItemFitsByteBuffer;
+        pxNewRingbuffer->vCopyItem = prvCopyItemByteBuf;
+        pxNewRingbuffer->pvGetItem = prvGetItemByteBuf;
+        pxNewRingbuffer->vReturnItem = prvReturnItemByteBuf;
+        //Byte buffers do not incur any overhead
+        pxNewRingbuffer->xMaxItemSize = pxNewRingbuffer->xSize;
+        pxNewRingbuffer->xGetCurMaxSize = prvGetCurMaxSizeByteBuf;
+    }
+    xSemaphoreGive(rbGET_TX_SEM_HANDLE(pxNewRingbuffer));
+    vPortCPUInitializeMutex(&pxNewRingbuffer->mux);
+}
 
 static size_t prvGetFreeSize(Ringbuffer_t *pxRingbuffer)
 {
@@ -371,7 +453,7 @@ static void *prvGetItemDefault(Ringbuffer_t *pxRingbuffer, BaseType_t *pxIsSplit
     return (void *)pcReturn;
 }
 
-static void *prvGetItemByteBuf(Ringbuffer_t *pxRingbuffer, BaseType_t *pxUnusedParam ,size_t xMaxSize,  size_t *pxItemSize)
+static void *prvGetItemByteBuf(Ringbuffer_t *pxRingbuffer, BaseType_t *pxUnusedParam, size_t xMaxSize, size_t *pxItemSize)
 {
     //Check arguments and buffer state
     configASSERT((pxRingbuffer->xItemsWaiting > 0) && ((pxRingbuffer->pucRead != pxRingbuffer->pucWrite) || (pxRingbuffer->uxRingbufferFlags & rbBUFFER_FULL_FLAG)));   //Check there are items to be read
@@ -560,7 +642,7 @@ static BaseType_t prvReceiveGeneric(Ringbuffer_t *pxRingbuffer, void **pvItem1, 
     TickType_t xTicksRemaining = xTicksToWait;
     while (xTicksRemaining <= xTicksToWait) {   //xTicksToWait will underflow once xTaskGetTickCount() > ticks_end
         //Block until more free space becomes available or timeout
-        if (xSemaphoreTake(pxRingbuffer->xItemsBufferedSemaphore, xTicksRemaining) != pdTRUE) {
+        if (xSemaphoreTake(rbGET_RX_SEM_HANDLE(pxRingbuffer), xTicksRemaining) != pdTRUE) {
             xReturn = pdFALSE;     //Timed out attempting to get semaphore
             break;
         }
@@ -606,7 +688,7 @@ static BaseType_t prvReceiveGeneric(Ringbuffer_t *pxRingbuffer, void **pvItem1, 
     }
 
     if (xReturnSemaphore == pdTRUE) {
-        xSemaphoreGive(pxRingbuffer->xItemsBufferedSemaphore);  //Give semaphore back so other tasks can retrieve
+        xSemaphoreGive(rbGET_RX_SEM_HANDLE(pxRingbuffer));  //Give semaphore back so other tasks can retrieve
     }
     return xReturn;
 }
@@ -617,7 +699,7 @@ static BaseType_t prvReceiveGenericFromISR(Ringbuffer_t *pxRingbuffer, void **pv
     BaseType_t xReturnSemaphore = pdFALSE;
 
     portENTER_CRITICAL_ISR(&pxRingbuffer->mux);
-    if(prvCheckItemAvail(pxRingbuffer) == pdTRUE) {
+    if (prvCheckItemAvail(pxRingbuffer) == pdTRUE) {
         BaseType_t xIsSplit;
         if (pxRingbuffer->uxRingbufferFlags & rbBYTE_BUFFER_FLAG) {
             //Second argument (pxIsSplit) is unused for byte buffers
@@ -644,95 +726,54 @@ static BaseType_t prvReceiveGenericFromISR(Ringbuffer_t *pxRingbuffer, void **pv
     portEXIT_CRITICAL_ISR(&pxRingbuffer->mux);
 
     if (xReturnSemaphore == pdTRUE) {
-        xSemaphoreGiveFromISR(pxRingbuffer->xItemsBufferedSemaphore, NULL);  //Give semaphore back so other tasks can retrieve
+        xSemaphoreGiveFromISR(rbGET_RX_SEM_HANDLE(pxRingbuffer), NULL);  //Give semaphore back so other tasks can retrieve
     }
     return xReturn;
 }
 
-/* ------------------------------------------------- Public Definitions -------------------------------------------- */
+/* --------------------------- Public Definitions --------------------------- */
 
-RingbufHandle_t xRingbufferCreate(size_t xBufferSize, ringbuf_type_t xBufferType)
+RingbufHandle_t xRingbufferCreate(size_t xBufferSize, RingbufferType_t xBufferType)
 {
+    configASSERT(xBufferSize > 0);
+    configASSERT(xBufferType < RINGBUF_TYPE_MAX);
+
     //Allocate memory
-    Ringbuffer_t *pxRingbuffer = calloc(1, sizeof(Ringbuffer_t));
-    if (pxRingbuffer == NULL) {
-        goto err;
-    }
     if (xBufferType != RINGBUF_TYPE_BYTEBUF) {
         xBufferSize = rbALIGN_SIZE(xBufferSize);    //xBufferSize is rounded up for no-split/allow-split buffers
     }
-    pxRingbuffer->pucHead = malloc(xBufferSize);
-    if (pxRingbuffer->pucHead == NULL) {
+    Ringbuffer_t *pxNewRingbuffer = calloc(1, sizeof(Ringbuffer_t));
+    uint8_t *pucRingbufferStorage = malloc(xBufferSize);
+    if (pxNewRingbuffer == NULL || pucRingbufferStorage == NULL) {
         goto err;
     }
 
-    //Initialize values
-    pxRingbuffer->xSize = xBufferSize;
-    pxRingbuffer->pucTail = pxRingbuffer->pucHead + xBufferSize;
-    pxRingbuffer->pucFree = pxRingbuffer->pucHead;
-    pxRingbuffer->pucRead = pxRingbuffer->pucHead;
-    pxRingbuffer->pucWrite = pxRingbuffer->pucHead;
-    pxRingbuffer->xItemsWaiting = 0;
-    pxRingbuffer->xFreeSpaceSemaphore = xSemaphoreCreateBinary();
-    pxRingbuffer->xItemsBufferedSemaphore = xSemaphoreCreateBinary();
-    pxRingbuffer->uxRingbufferFlags = 0;
-
-    //Initialize type dependent values and function pointers
-    if (xBufferType == RINGBUF_TYPE_NOSPLIT) {
-        pxRingbuffer->xCheckItemFits = prvCheckItemFitsDefault;
-        pxRingbuffer->vCopyItem = prvCopyItemNoSplit;
-        pxRingbuffer->pvGetItem = prvGetItemDefault;
-        pxRingbuffer->vReturnItem = prvReturnItemDefault;
-        /*
-         * Buffer lengths are always aligned. No-split buffer (read/write/free)
-         * pointers are also always aligned. Therefore worse case scenario is
-         * the write pointer is at the most aligned halfway point.
-         */
-        pxRingbuffer->xMaxItemSize = rbALIGN_SIZE(pxRingbuffer->xSize / 2) - rbHEADER_SIZE;
-        pxRingbuffer->xGetCurMaxSize = prvGetCurMaxSizeNoSplit;
-    } else if (xBufferType == RINGBUF_TYPE_ALLOWSPLIT) {
-        pxRingbuffer->uxRingbufferFlags |= rbALLOW_SPLIT_FLAG;
-        pxRingbuffer->xCheckItemFits = prvCheckItemFitsDefault;
-        pxRingbuffer->vCopyItem = prvCopyItemAllowSplit;
-        pxRingbuffer->pvGetItem = prvGetItemDefault;
-        pxRingbuffer->vReturnItem = prvReturnItemDefault;
-        //Worst case an item is split into two, incurring two headers of overhead
-        pxRingbuffer->xMaxItemSize = pxRingbuffer->xSize - (sizeof(ItemHeader_t) * 2);
-        pxRingbuffer->xGetCurMaxSize = prvGetCurMaxSizeAllowSplit;
-    } else if (xBufferType == RINGBUF_TYPE_BYTEBUF) {
-        pxRingbuffer->uxRingbufferFlags |= rbBYTE_BUFFER_FLAG;
-        pxRingbuffer->xCheckItemFits = prvCheckItemFitsByteBuffer;
-        pxRingbuffer->vCopyItem = prvCopyItemByteBuf;
-        pxRingbuffer->pvGetItem = prvGetItemByteBuf;
-        pxRingbuffer->vReturnItem = prvReturnItemByteBuf;
-        //Byte buffers do not incur any overhead
-        pxRingbuffer->xMaxItemSize = pxRingbuffer->xSize;
-        pxRingbuffer->xGetCurMaxSize = prvGetCurMaxSizeByteBuf;
-    } else {
-        //Unsupported type
-        configASSERT(0);
-    }
-
-    if (pxRingbuffer->xFreeSpaceSemaphore == NULL || pxRingbuffer->xItemsBufferedSemaphore == NULL) {
+    //Initialize Semaphores
+#if ( configSUPPORT_STATIC_ALLOCATION == 1)
+    //We don't use the handles for static semaphores, and xSemaphoreCreateBinaryStatic will never fail thus no need to check static case
+    xSemaphoreCreateBinaryStatic(&(pxNewRingbuffer->xTransSemStatic));
+    xSemaphoreCreateBinaryStatic(&(pxNewRingbuffer->xRecvSemStatic));
+#else
+    pxNewRingbuffer->xTransSemHandle = xSemaphoreCreateBinary();
+    pxNewRingbuffer->xRecvSemHandle = xSemaphoreCreateBinary();
+    if (pxNewRingbuffer->xTransSemHandle == NULL || pxNewRingbuffer->xRecvSemHandle == NULL) {
+        if (pxNewRingbuffer->xTransSemHandle != NULL) {
+            vSemaphoreDelete(pxNewRingbuffer->xTransSemHandle);
+        }
+        if (pxNewRingbuffer->xRecvSemHandle != NULL) {
+            vSemaphoreDelete(pxNewRingbuffer->xRecvSemHandle);
+        }
         goto err;
     }
-    xSemaphoreGive(pxRingbuffer->xFreeSpaceSemaphore);
-    vPortCPUInitializeMutex(&pxRingbuffer->mux);
+#endif
 
-    return (RingbufHandle_t)pxRingbuffer;
+    prvInitializeNewRingbuffer(xBufferSize, xBufferType, pxNewRingbuffer, pucRingbufferStorage);
+    return (RingbufHandle_t)pxNewRingbuffer;
 
 err:
-    //Some error has happened. Free/destroy all allocated things and return NULL.
-    if (pxRingbuffer) {
-        free(pxRingbuffer->pucHead);
-        if (pxRingbuffer->xFreeSpaceSemaphore) {
-            vSemaphoreDelete(pxRingbuffer->xFreeSpaceSemaphore);
-        }
-        if (pxRingbuffer->xItemsBufferedSemaphore) {
-            vSemaphoreDelete(pxRingbuffer->xItemsBufferedSemaphore);
-        }
-    }
-    free(pxRingbuffer);
+    //An error has occurred, Free memory and return NULL
+    free(pxNewRingbuffer);
+    free(pucRingbufferStorage);
     return NULL;
 }
 
@@ -740,6 +781,30 @@ RingbufHandle_t xRingbufferCreateNoSplit(size_t xItemSize, size_t xItemNum)
 {
     return xRingbufferCreate((rbALIGN_SIZE(xItemSize) + rbHEADER_SIZE) * xItemNum, RINGBUF_TYPE_NOSPLIT);
 }
+
+#if ( configSUPPORT_STATIC_ALLOCATION == 1 )
+RingbufHandle_t xRingbufferCreateStatic(size_t xBufferSize,
+                                        RingbufferType_t xBufferType,
+                                        uint8_t *pucRingbufferStorage,
+                                        StaticRingbuffer_t *pxStaticRingbuffer)
+{
+    //Check arguments
+    configASSERT(xBufferSize > 0);
+    configASSERT(xBufferType < RINGBUF_TYPE_MAX);
+    configASSERT(pucRingbufferStorage != NULL && pxStaticRingbuffer != NULL);
+    if (xBufferType != RINGBUF_TYPE_BYTEBUF) {
+        //No-split/allow-split buffer sizes must be 32-bit aligned
+        configASSERT(rbCHECK_ALIGNED(xBufferSize));
+    }
+
+    Ringbuffer_t *pxNewRingbuffer = (Ringbuffer_t *)pxStaticRingbuffer;
+    xSemaphoreCreateBinaryStatic(&(pxNewRingbuffer->xTransSemStatic));
+    xSemaphoreCreateBinaryStatic(&(pxNewRingbuffer->xRecvSemStatic));
+    prvInitializeNewRingbuffer(xBufferSize, xBufferType, pxNewRingbuffer, pucRingbufferStorage);
+    pxNewRingbuffer->uxRingbufferFlags |= rbBUFFER_STATIC_FLAG;
+    return (RingbufHandle_t)pxNewRingbuffer;
+}
+#endif
 
 BaseType_t xRingbufferSend(RingbufHandle_t xRingbuffer, const void *pvItem, size_t xItemSize, TickType_t xTicksToWait)
 {
@@ -761,13 +826,13 @@ BaseType_t xRingbufferSend(RingbufHandle_t xRingbuffer, const void *pvItem, size
     TickType_t xTicksRemaining = xTicksToWait;
     while (xTicksRemaining <= xTicksToWait) {   //xTicksToWait will underflow once xTaskGetTickCount() > ticks_end
         //Block until more free space becomes available or timeout
-        if (xSemaphoreTake(pxRingbuffer->xFreeSpaceSemaphore, xTicksRemaining) != pdTRUE) {
+        if (xSemaphoreTake(rbGET_TX_SEM_HANDLE(pxRingbuffer), xTicksRemaining) != pdTRUE) {
             xReturn = pdFALSE;
             break;
         }
         //Semaphore obtained, check if item can fit
         portENTER_CRITICAL(&pxRingbuffer->mux);
-        if(pxRingbuffer->xCheckItemFits(pxRingbuffer, xItemSize) == pdTRUE) {
+        if (pxRingbuffer->xCheckItemFits(pxRingbuffer, xItemSize) == pdTRUE) {
             //Item will fit, copy item
             pxRingbuffer->vCopyItem(pxRingbuffer, pvItem, xItemSize);
             xReturn = pdTRUE;
@@ -791,10 +856,10 @@ BaseType_t xRingbufferSend(RingbufHandle_t xRingbuffer, const void *pvItem, size
 
     if (xReturn == pdTRUE) {
         //Indicate item was successfully sent
-        xSemaphoreGive(pxRingbuffer->xItemsBufferedSemaphore);
+        xSemaphoreGive(rbGET_RX_SEM_HANDLE(pxRingbuffer));
     }
     if (xReturnSemaphore == pdTRUE) {
-        xSemaphoreGive(pxRingbuffer->xFreeSpaceSemaphore);  //Give back semaphore so other tasks can send
+        xSemaphoreGive(rbGET_TX_SEM_HANDLE(pxRingbuffer));  //Give back semaphore so other tasks can send
     }
     return xReturn;
 }
@@ -830,10 +895,10 @@ BaseType_t xRingbufferSendFromISR(RingbufHandle_t xRingbuffer, const void *pvIte
 
     if (xReturn == pdTRUE) {
         //Indicate item was successfully sent
-        xSemaphoreGiveFromISR(pxRingbuffer->xItemsBufferedSemaphore, pxHigherPriorityTaskWoken);
+        xSemaphoreGiveFromISR(rbGET_RX_SEM_HANDLE(pxRingbuffer), pxHigherPriorityTaskWoken);
     }
     if (xReturnSemaphore == pdTRUE) {
-        xSemaphoreGiveFromISR(pxRingbuffer->xFreeSpaceSemaphore, pxHigherPriorityTaskWoken);  //Give back semaphore so other tasks can send
+        xSemaphoreGiveFromISR(rbGET_TX_SEM_HANDLE(pxRingbuffer), pxHigherPriorityTaskWoken);  //Give back semaphore so other tasks can send
     }
     return xReturn;
 }
@@ -890,7 +955,7 @@ BaseType_t xRingbufferReceiveSplit(RingbufHandle_t xRingbuffer, void **ppvHeadIt
     if (prvReceiveGeneric(pxRingbuffer, &pvTempHeadItem, &pvTempTailItem, &xTempHeadSize, &xTempTailSize, 0, xTicksToWait) == pdTRUE) {
         //At least one item was retrieved
         *ppvHeadItem = pvTempHeadItem;
-        if(pxHeadItemSize != NULL){
+        if (pxHeadItemSize != NULL) {
             *pxHeadItemSize = xTempHeadSize;
         }
         //Check to see if a second item was also retrieved
@@ -1000,7 +1065,7 @@ void vRingbufferReturnItem(RingbufHandle_t xRingbuffer, void *pvItem)
     portENTER_CRITICAL(&pxRingbuffer->mux);
     pxRingbuffer->vReturnItem(pxRingbuffer, (uint8_t *)pvItem);
     portEXIT_CRITICAL(&pxRingbuffer->mux);
-    xSemaphoreGive(pxRingbuffer->xFreeSpaceSemaphore);
+    xSemaphoreGive(rbGET_TX_SEM_HANDLE(pxRingbuffer));
 }
 
 void vRingbufferReturnItemFromISR(RingbufHandle_t xRingbuffer, void *pvItem, BaseType_t *pxHigherPriorityTaskWoken)
@@ -1012,7 +1077,7 @@ void vRingbufferReturnItemFromISR(RingbufHandle_t xRingbuffer, void *pvItem, Bas
     portENTER_CRITICAL_ISR(&pxRingbuffer->mux);
     pxRingbuffer->vReturnItem(pxRingbuffer, (uint8_t *)pvItem);
     portEXIT_CRITICAL_ISR(&pxRingbuffer->mux);
-    xSemaphoreGiveFromISR(pxRingbuffer->xFreeSpaceSemaphore, pxHigherPriorityTaskWoken);
+    xSemaphoreGiveFromISR(rbGET_TX_SEM_HANDLE(pxRingbuffer), pxHigherPriorityTaskWoken);
 }
 
 void vRingbufferDelete(RingbufHandle_t xRingbuffer)
@@ -1020,15 +1085,16 @@ void vRingbufferDelete(RingbufHandle_t xRingbuffer)
     Ringbuffer_t *pxRingbuffer = (Ringbuffer_t *)xRingbuffer;
     configASSERT(pxRingbuffer);
 
-    if (pxRingbuffer) {
-        free(pxRingbuffer->pucHead);
-        if (pxRingbuffer->xFreeSpaceSemaphore) {
-            vSemaphoreDelete(pxRingbuffer->xFreeSpaceSemaphore);
-        }
-        if (pxRingbuffer->xItemsBufferedSemaphore) {
-            vSemaphoreDelete(pxRingbuffer->xItemsBufferedSemaphore);
-        }
+    vSemaphoreDelete(rbGET_TX_SEM_HANDLE(pxRingbuffer));
+    vSemaphoreDelete(rbGET_RX_SEM_HANDLE(pxRingbuffer));
+
+#if ( configSUPPORT_STATIC_ALLOCATION == 1 )
+    if (pxRingbuffer->uxRingbufferFlags & rbBUFFER_STATIC_FLAG) {
+        //Ring buffer was statically allocated, no need to free
+        return;
     }
+#endif
+    free(pxRingbuffer->pucHead);
     free(pxRingbuffer);
 }
 
@@ -1059,11 +1125,11 @@ BaseType_t xRingbufferAddToQueueSetRead(RingbufHandle_t xRingbuffer, QueueSetHan
     BaseType_t xReturn;
     portENTER_CRITICAL(&pxRingbuffer->mux);
     //Cannot add semaphore to queue set if semaphore is not empty. Temporarily hold semaphore
-    BaseType_t xHoldSemaphore = xSemaphoreTake(pxRingbuffer->xItemsBufferedSemaphore, 0);
-    xReturn = xQueueAddToSet(pxRingbuffer->xItemsBufferedSemaphore, xQueueSet);
+    BaseType_t xHoldSemaphore = xSemaphoreTake(rbGET_RX_SEM_HANDLE(pxRingbuffer), 0);
+    xReturn = xQueueAddToSet(rbGET_RX_SEM_HANDLE(pxRingbuffer), xQueueSet);
     if (xHoldSemaphore == pdTRUE) {
         //Return semaphore if temporarily held
-        configASSERT(xSemaphoreGive(pxRingbuffer->xItemsBufferedSemaphore) == pdTRUE);
+        configASSERT(xSemaphoreGive(rbGET_RX_SEM_HANDLE(pxRingbuffer)) == pdTRUE);
     }
     portEXIT_CRITICAL(&pxRingbuffer->mux);
     return xReturn;
@@ -1074,7 +1140,7 @@ BaseType_t xRingbufferCanRead(RingbufHandle_t xRingbuffer, QueueSetMemberHandle_
     //Check if the selected queue set member is the ring buffer's read semaphore
     Ringbuffer_t *pxRingbuffer = (Ringbuffer_t *)xRingbuffer;
     configASSERT(pxRingbuffer);
-    return (pxRingbuffer->xItemsBufferedSemaphore == xMember) ? pdTRUE : pdFALSE;
+    return (rbGET_RX_SEM_HANDLE(pxRingbuffer) == xMember) ? pdTRUE : pdFALSE;
 }
 
 BaseType_t xRingbufferRemoveFromQueueSetRead(RingbufHandle_t xRingbuffer, QueueSetHandle_t xQueueSet)
@@ -1085,11 +1151,11 @@ BaseType_t xRingbufferRemoveFromQueueSetRead(RingbufHandle_t xRingbuffer, QueueS
     BaseType_t xReturn;
     portENTER_CRITICAL(&pxRingbuffer->mux);
     //Cannot remove semaphore from queue set if semaphore is not empty. Temporarily hold semaphore
-    BaseType_t xHoldSemaphore = xSemaphoreTake(pxRingbuffer->xItemsBufferedSemaphore, 0);
-    xReturn = xQueueRemoveFromSet(pxRingbuffer->xItemsBufferedSemaphore, xQueueSet);
+    BaseType_t xHoldSemaphore = xSemaphoreTake(rbGET_RX_SEM_HANDLE(pxRingbuffer), 0);
+    xReturn = xQueueRemoveFromSet(rbGET_RX_SEM_HANDLE(pxRingbuffer), xQueueSet);
     if (xHoldSemaphore == pdTRUE) {
         //Return semaphore if temporarily held
-        configASSERT(xSemaphoreGive(pxRingbuffer->xItemsBufferedSemaphore) == pdTRUE);
+        configASSERT(xSemaphoreGive(rbGET_RX_SEM_HANDLE(pxRingbuffer)) == pdTRUE);
     }
     portEXIT_CRITICAL(&pxRingbuffer->mux);
     return xReturn;
@@ -1153,11 +1219,11 @@ BaseType_t xRingbufferAddToQueueSetWrite(RingbufHandle_t xRingbuffer, QueueSetHa
     BaseType_t xReturn;
     portENTER_CRITICAL(&pxRingbuffer->mux);
     //Cannot add semaphore to queue set if semaphore is not empty. Temporary hold semaphore
-    BaseType_t xHoldSemaphore = xSemaphoreTake(pxRingbuffer->xFreeSpaceSemaphore, 0);
-    xReturn = xQueueAddToSet(pxRingbuffer->xFreeSpaceSemaphore, xQueueSet);
+    BaseType_t xHoldSemaphore = xSemaphoreTake(rbGET_TX_SEM_HANDLE(pxRingbuffer), 0);
+    xReturn = xQueueAddToSet(rbGET_TX_SEM_HANDLE(pxRingbuffer), xQueueSet);
     if (xHoldSemaphore == pdTRUE) {
         //Return semaphore is temporarily held
-        configASSERT(xSemaphoreGive(pxRingbuffer->xFreeSpaceSemaphore) == pdTRUE);
+        configASSERT(xSemaphoreGive(rbGET_TX_SEM_HANDLE(pxRingbuffer)) == pdTRUE);
     }
     portEXIT_CRITICAL(&pxRingbuffer->mux);
     return xReturn;
@@ -1172,11 +1238,11 @@ BaseType_t xRingbufferRemoveFromQueueSetWrite(RingbufHandle_t xRingbuffer, Queue
     BaseType_t xReturn;
     portENTER_CRITICAL(&pxRingbuffer->mux);
     //Cannot remove semaphore from queue set if semaphore is not empty. Temporary hold semaphore
-    BaseType_t xHoldSemaphore = xSemaphoreTake(pxRingbuffer->xFreeSpaceSemaphore, 0);
-    xReturn = xQueueRemoveFromSet(pxRingbuffer->xFreeSpaceSemaphore, xQueueSet);
+    BaseType_t xHoldSemaphore = xSemaphoreTake(rbGET_TX_SEM_HANDLE(pxRingbuffer), 0);
+    xReturn = xQueueRemoveFromSet(rbGET_TX_SEM_HANDLE(pxRingbuffer), xQueueSet);
     if (xHoldSemaphore == pdTRUE) {
         //Return semaphore is temporarily held
-        configASSERT(xSemaphoreGive(pxRingbuffer->xFreeSpaceSemaphore) == pdTRUE);
+        configASSERT(xSemaphoreGive(rbGET_TX_SEM_HANDLE(pxRingbuffer)) == pdTRUE);
     }
     portEXIT_CRITICAL(&pxRingbuffer->mux);
     return xReturn;

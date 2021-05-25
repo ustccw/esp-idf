@@ -16,7 +16,7 @@
 #define FREERTOS_RINGBUF_H
 
 #ifndef INC_FREERTOS_H
-	#error "include FreeRTOS.h" must appear in source files before "include ringbuf.h"
+#error "include FreeRTOS.h" must appear in source files before "include ringbuf.h"
 #endif
 
 #ifdef __cplusplus
@@ -30,30 +30,57 @@ extern "C" {
  * returns a RingbufHandle_t variable that can then be used as a parameter to
  * xRingbufferSend(), xRingbufferReceive(), etc.
  */
-typedef void * RingbufHandle_t;
+typedef void *RingbufHandle_t;
 
 typedef enum {
-	/**
-	 * No-split buffers will only store an item in contiguous memory and will
-	 * never split an item. Each item requires an 8 byte overhead for a header
-	 * and will always internally occupy a 32-bit aligned size of space.
-	 */
-	RINGBUF_TYPE_NOSPLIT = 0,
-	/**
-	 * Allow-split buffers will split an item into two parts if necessary in
-	 * order to store it. Each item requires an 8 byte overhead for a header,
-	 * splitting incurs an extra header. Each item will always internally occupy
-	 * a 32-bit aligned size of space.
-	 */
-	RINGBUF_TYPE_ALLOWSPLIT,
-	/**
-	 * Byte buffers store data as a sequence of bytes and do not maintain separate
-	 * items, therefore byte buffers have no overhead. All data is stored as a
-	 * sequence of byte and any number of bytes can be sent or retrieved each
-	 * time.
-	 */
-	RINGBUF_TYPE_BYTEBUF
-} ringbuf_type_t;
+    /**
+     * No-split buffers will only store an item in contiguous memory and will
+     * never split an item. Each item requires an 8 byte overhead for a header
+     * and will always internally occupy a 32-bit aligned size of space.
+     */
+    RINGBUF_TYPE_NOSPLIT = 0,
+    /**
+     * Allow-split buffers will split an item into two parts if necessary in
+     * order to store it. Each item requires an 8 byte overhead for a header,
+     * splitting incurs an extra header. Each item will always internally occupy
+     * a 32-bit aligned size of space.
+     */
+    RINGBUF_TYPE_ALLOWSPLIT,
+    /**
+     * Byte buffers store data as a sequence of bytes and do not maintain separate
+     * items, therefore byte buffers have no overhead. All data is stored as a
+     * sequence of byte and any number of bytes can be sent or retrieved each
+     * time.
+     */
+    RINGBUF_TYPE_BYTEBUF,
+    RINGBUF_TYPE_MAX,
+} RingbufferType_t;
+
+typedef RingbufferType_t ringbuf_type_t;
+
+/**
+ * @brief Struct that is equivalent in size to the ring buffer's data structure
+ *
+ * The contents of this struct are not meant to be used directly. This
+ * structure is meant to be used when creating a statically allocated ring
+ * buffer where this struct is of the exact size required to store a ring
+ * buffer's control data structure.
+ *
+ * @note The CONFIG_FREERTOS_SUPPORT_STATIC_ALLOCATION option must be enabled for
+ *       this structure to be available.
+ */
+#if ( configSUPPORT_STATIC_ALLOCATION == 1)
+typedef struct xSTATIC_RINGBUFFER {
+    /** @cond */    //Doxygen command to hide this structure from API Reference
+    size_t xDummy1[2];
+    UBaseType_t uxDummy2;
+    BaseType_t xDummy3;
+    void *pvDummy4[10];
+    StaticSemaphore_t xDummy5[2];
+    portMUX_TYPE muxDummy;
+    /** @endcond */
+} StaticRingbuffer_t;
+#endif
 
 /**
  * @brief       Create a ring buffer
@@ -66,7 +93,7 @@ typedef enum {
  *
  * @return  A handle to the created ring buffer, or NULL in case of error.
  */
-RingbufHandle_t xRingbufferCreate(size_t xBufferSize, ringbuf_type_t xBufferType);
+RingbufHandle_t xRingbufferCreate(size_t xBufferSize, RingbufferType_t xBufferType);
 
 /**
  * @brief Create a ring buffer of type RINGBUF_TYPE_NOSPLIT for a fixed item_size
@@ -81,11 +108,33 @@ RingbufHandle_t xRingbufferCreate(size_t xBufferSize, ringbuf_type_t xBufferType
  */
 RingbufHandle_t xRingbufferCreateNoSplit(size_t xItemSize, size_t xItemNum);
 
+
+/**
+ * @brief       Create a ring buffer but manually provide the required memory
+ *
+ * @param[in]   xBufferSize Size of the buffer in bytes.
+ * @param[in]   xBufferType Type of ring buffer, see documentation
+ * @param[in]   pucRingbufferStorage Pointer to the ring buffer's storage area.
+ *              Storage area must of the same size as specified by xBufferSize
+ * @param[in]   pxStaticRingbuffer Pointed to a struct of type StaticRingbuffer_t
+ *              which will be used to hold the ring buffer's data structure
+ *
+ * @note    The CONFIG_FREERTOS_SUPPORT_STATIC_ALLOCATION option must be enabled
+ *          for this to be available
+ *
+ * @note    xBufferSize of no-split/allow-split buffers MUST be 32-bit aligned.
+ *
+ * @return  A handle to the created ring buffer
+ */
+#if ( configSUPPORT_STATIC_ALLOCATION == 1)
+RingbufHandle_t xRingbufferCreateStatic(size_t xBufferSize, RingbufferType_t xBufferType, uint8_t *pucRingbufferStorage, StaticRingbuffer_t *pxStaticRingbuffer);
+#endif
+
 /**
  * @brief       Insert an item into the ring buffer
  *
  * Attempt to insert an item into the ring buffer. This function will block until
- * enough free space is available or until it timesout.
+ * enough free space is available or until it times out.
  *
  * @param[in]   xRingbuffer     Ring buffer to insert the item into
  * @param[in]   pvItem          Pointer to data to insert. NULL is allowed if xItemSize is 0.
@@ -129,7 +178,7 @@ BaseType_t xRingbufferSendFromISR(RingbufHandle_t xRingbuffer, const void *pvIte
  * @brief   Retrieve an item from the ring buffer
  *
  * Attempt to retrieve an item from the ring buffer. This function will block
- * until an item is available or until it timesout.
+ * until an item is available or until it times out.
  *
  * @param[in]   xRingbuffer     Ring buffer to retrieve the item from
  * @param[out]  pxItemSize      Pointer to a variable to which the size of the retrieved item will be written.
@@ -168,7 +217,7 @@ void *xRingbufferReceiveFromISR(RingbufHandle_t xRingbuffer, size_t *pxItemSize)
  * Attempt to retrieve a split item from an allow-split ring buffer. If the item
  * is not split, only a single item is retried. If the item is split, both parts
  * will be retrieved. This function will block until an item is available or
- * until it timesout.
+ * until it times out.
  *
  * @param[in]   xRingbuffer     Ring buffer to retrieve the item from
  * @param[out]  ppvHeadItem     Double pointer to first part (set to NULL if no items were retrieved)
@@ -214,7 +263,7 @@ BaseType_t xRingbufferReceiveSplitFromISR(RingbufHandle_t xRingbuffer, void **pp
  *
  * Attempt to retrieve data from a byte buffer whilst specifying a maximum number
  * of bytes to retrieve. This function will block until there is data available
- * for retrieval or until it timesout.
+ * for retrieval or until it times out.
  *
  * @param[in]   xRingbuffer     Ring buffer to retrieve the item from
  * @param[out]  pxItemSize      Pointer to a variable to which the size of the retrieved item will be written.
@@ -281,6 +330,10 @@ void vRingbufferReturnItemFromISR(RingbufHandle_t xRingbuffer, void *pvItem, Bas
  * @brief   Delete a ring buffer
  *
  * @param[in]   xRingbuffer     Ring buffer to delete
+ *
+ * @note    This function will not deallocate any memory if the ring buffer was
+ *          created using xRingbufferCreateStatic(). Deallocation must be done
+ *          manually be the user.
  */
 void vRingbufferDelete(RingbufHandle_t xRingbuffer);
 
@@ -291,6 +344,12 @@ void vRingbufferDelete(RingbufHandle_t xRingbuffer);
  * an empty ring buffer.
  *
  * @param[in]   xRingbuffer     Ring buffer to query
+ *
+ * @note    The max item size for a no-split buffer is limited to
+ *          ((buffer_size/2)-header_size). This limit is imposed so that an item
+ *          of max item size can always be sent to the an empty no-split buffer
+ *          regardless of the internal positions of the buffer's read/write/free
+ *          pointers.
  *
  * @return  Maximum size, in bytes, of an item that can be placed in a ring buffer.
  */
@@ -306,6 +365,10 @@ size_t xRingbufferGetMaxItemSize(RingbufHandle_t xRingbuffer);
  * @warning This API is not thread safe. So, if multiple threads are accessing
  *          the same ring buffer, it is the application's responsibility to
  *          ensure atomic access to this API and the subsequent Send
+ *
+ * @note    An empty no-split buffer has a max current free size for an item
+ *          that is limited to ((buffer_size/2)-header_size). See API reference
+ *          for xRingbufferGetMaxItemSize().
  *
  * @param[in]   xRingbuffer     Ring buffer to query
  *
