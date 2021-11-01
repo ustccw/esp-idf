@@ -127,20 +127,21 @@ static void sweep_for_success_sample_points(uint8_t *reference_data, const spi_t
         memset(read_data, 0, SPI_TIMING_TEST_DATA_LEN);
 #if SPI_TIMING_FLASH_NEEDS_TUNING
         if (is_flash) {
-            spi_timing_config_flash_tune_din_num_mode(config->tuning_config_table[config_idx].spi_din_mode, config->tuning_config_table[config_idx].spi_din_num);
-            spi_timing_config_flash_tune_dummy(config->tuning_config_table[config_idx].extra_dummy_len);
+            spi_timing_config_flash_set_tuning_regs(&(config->tuning_config_table[config_idx]));
             spi_timing_config_flash_read_data(1, read_data, SPI_TIMING_FLASH_TEST_DATA_ADDR, sizeof(read_data));
         }
 #endif
 #if SPI_TIMING_PSRAM_NEEDS_TUNING
         if (!is_flash) {
-            spi_timing_config_psram_tune_din_num_mode(config->tuning_config_table[config_idx].spi_din_mode, config->tuning_config_table[config_idx].spi_din_num);
-            spi_timing_config_psram_tune_dummy(config->tuning_config_table[config_idx].extra_dummy_len);
+            spi_timing_config_psram_set_tuning_regs(&(config->tuning_config_table[config_idx]));
             spi_timing_config_psram_read_data(1, read_data, SPI_TIMING_PSRAM_TEST_DATA_ADDR, SPI_TIMING_TEST_DATA_LEN);
         }
 #endif
         if (memcmp(reference_data, read_data, sizeof(read_data)) == 0) {
             out_array[config_idx] = 1;
+            ets_printf("success: %d\n", config_idx);
+        } else {
+            ets_printf("fail: %d\n", config_idx);
         }
     }
 }

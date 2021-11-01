@@ -319,41 +319,36 @@ void spi_timing_config_psram_read_data(uint8_t spi_num, uint8_t *buf, uint32_t a
  * These APIs are only used in `spi_flash_timing_tuning.c/sweep_for_success_sample_points()` for
  * configuring SPI1 timing tuning related registers to find best tuning parameter
  *-------------------------------------------------------------------------------------------------*/
-void spi_timing_config_flash_tune_din_num_mode(uint8_t din_mode, uint8_t din_num)
+
+void spi_timing_config_flash_set_tuning_regs(const spi_timing_tuning_param_t *params)
 {
     /**
      * 1. SPI_MEM_DINx_MODE(1), SPI_MEM_DINx_NUM(1) are meaningless
      *    SPI0 and SPI1 share the SPI_MEM_DINx_MODE(0), SPI_MEM_DINx_NUM(0) for FLASH timing tuning
      * 2. We use SPI1 to get the best Flash timing tuning (mode and num) config
      */
-    spi_timing_config_flash_set_din_mode_num(0, din_mode, din_num);
+    spi_timing_config_flash_set_din_mode_num(0, params->spi_din_mode, params->spi_din_num);
+
+    spi_timing_config_flash_set_extra_dummy(1, params->extra_dummy_len);
 }
 
-void spi_timing_config_flash_tune_dummy(uint8_t extra_dummy)
-{
-    spi_timing_config_flash_set_extra_dummy(1, extra_dummy);
-}
-
-void spi_timing_config_psram_tune_din_num_mode(uint8_t din_mode, uint8_t din_num)
+void spi_timing_config_psram_set_tuning_regs(const spi_timing_tuning_param_t *params)
 {
     /**
      * 1. SPI_MEM_SPI_SMEM_DINx_MODE(1), SPI_MEM_SPI_SMEM_DINx_NUM(1) are meaningless
      *    SPI0 and SPI1 share the SPI_MEM_SPI_SMEM_DINx_MODE(0), SPI_MEM_SPI_SMEM_DINx_NUM(0) for PSRAM timing tuning
      * 2. We use SPI1 to get the best PSRAM timing tuning (mode and num) config
      */
-    spi_timing_config_psram_set_din_mode_num(0, din_mode, din_num);
-}
+    spi_timing_config_psram_set_din_mode_num(0, params->spi_din_mode, params->spi_din_num);
 
-void spi_timing_config_psram_tune_dummy(uint8_t extra_dummy)
-{
 #if CONFIG_SPIRAM_MODE_OCT
     //On 728, for SPI1, flash and psram share the extra dummy register
-    spi_timing_config_flash_set_extra_dummy(1, extra_dummy);
+    spi_timing_config_flash_set_extra_dummy(1, params->extra_dummy_len);
 #elif CONFIG_SPIRAM_MODE_QUAD
     //Update this `s_psram_extra_dummy`, the `s_psram_read_data` will set dummy according to this `s_psram_extra_dummy`
-    s_psram_extra_dummy = extra_dummy;
+    s_psram_extra_dummy = params->extra_dummy_len;
     SET_PERI_REG_MASK(SPI_MEM_USER_REG(1), SPI_MEM_USR_DUMMY); // dummy en
-    SET_PERI_REG_BITS(SPI_MEM_USER1_REG(1), SPI_MEM_USR_DUMMY_CYCLELEN_V, extra_dummy - 1, SPI_MEM_USR_DUMMY_CYCLELEN_S);
+    SET_PERI_REG_BITS(SPI_MEM_USER1_REG(1), SPI_MEM_USR_DUMMY_CYCLELEN_V, s_psram_extra_dummy - 1, SPI_MEM_USR_DUMMY_CYCLELEN_S);
 #endif
 }
 

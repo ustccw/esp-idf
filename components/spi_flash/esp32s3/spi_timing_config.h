@@ -235,18 +235,18 @@ void spi_timing_config_psram_read_data(uint8_t spi_num,uint8_t *buf, uint32_t ad
 
 /*-------------------------------------------------------------------------------------------------
  * SPI1 Timing Tuning APIs
- * These APIs are only used in `spi_flash_timing_tuning.c/sweep_for_success_sample_points()` for
- * configuring SPI1 timing tuning related registers to find best tuning parameter
+ *
+ * These APIs are only used in `spi_flash_timing_tuning.c` for configuring SPI1 timing
+ * tuning related registers to find best tuning parameter for Flash and PSRAM
  *-------------------------------------------------------------------------------------------------*/
-void spi_timing_config_flash_tune_din_num_mode(uint8_t din_mode, uint8_t din_num);
-void spi_timing_config_flash_tune_dummy(uint8_t extra_dummy);
-void spi_timing_config_psram_tune_din_num_mode(uint8_t din_mode, uint8_t din_num);
-void spi_timing_config_psram_tune_dummy(uint8_t extra_dummy);
+void spi_timing_config_flash_set_tuning_regs(const spi_timing_tuning_param_t *params);
+void spi_timing_config_psram_set_tuning_regs(const spi_timing_tuning_param_t *params);
 
-/**
- * SPI1 register info get APIs. These APIs inform `spi_flash_timing_tuning.c` (driver layer) of the SPI1 flash settings.
- * In this way, other components (e.g.: esp_flash driver) can get the info from it (`spi_flash_timing_tuning.c`).
- */
+/*-------------------------------------------------------------------------------------------------
+ * SPI1 register info get APIs. These APIs inform `spi_flash_timing_tuning.c` (driver layer)
+ * of the SPI1 flash settings. In this way, other components (e.g.: esp_flash driver) can
+ * get the info from it (`spi_flash_timing_tuning.c`).
+ *-------------------------------------------------------------------------------------------------*/
 void spi_timing_config_get_cs_timing(uint8_t *setup_time, uint32_t *hold_time);
 uint32_t spi_timing_config_get_flash_clock_reg(void);
 
