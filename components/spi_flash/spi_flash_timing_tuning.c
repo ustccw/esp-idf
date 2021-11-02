@@ -6,6 +6,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <sys/param.h>
 #include "sdkconfig.h"
 #include "esp_attr.h"
 #include "esp_err.h"
@@ -15,6 +16,7 @@
 #include "soc/io_mux_reg.h"
 #include "esp_private/spi_flash_os.h"
 #include "soc/soc.h"
+#include "soc/rtc.h"
 #if CONFIG_IDF_TARGET_ESP32S3
 #include "esp32s3/spi_timing_config.h"
 #include "esp32s3/rom/cache.h"
@@ -86,10 +88,13 @@ static uint32_t get_psram_clock_divider(void)
 #endif
 }
 
+/**
+ * Timing Tuning Algorithms and Methods
+ *
+ * @note Consider putting these algorithms into another file, and use `V1`, `V2` ... `Vn` for chip-specific versions.
+ * Should be considered when doing other chip timing tuning
+ */
 #if SPI_TIMING_FLASH_NEEDS_TUNING || SPI_TIMING_PSRAM_NEEDS_TUNING
-/*------------------------------------------------------------------------------
- * Static functions to do timing tuning
- *----------------------------------------------------------------------------*/
 /**
  * Set timing tuning regs, in order to get successful sample points
  */
@@ -139,9 +144,6 @@ static void sweep_for_success_sample_points(uint8_t *reference_data, const spi_t
 #endif
         if (memcmp(reference_data, read_data, sizeof(read_data)) == 0) {
             out_array[config_idx] = 1;
-            ets_printf("success: %d\n", config_idx);
-        } else {
-            ets_printf("fail: %d\n", config_idx);
         }
     }
 }
@@ -176,14 +178,70 @@ static void find_max_consecutive_success_points(uint8_t *array, uint32_t size, u
     *out_end_index = match_num == size ? size : end;
 }
 
+#if (SPI_TIMING_FLASH_DTR_MODE || SPI_TIMING_PSRAM_DTR_MODE) && (SPI_TIMING_CORE_CLOCK_MHZ == 240)
+extern void rtc_clk_bbpll_configure(rtc_xtal_freq_t xtal_freq, int pll_freq);
+extern void rtc_clk_configure_pll(rtc_xtal_freq_t xtal_freq, int pll_freq, uint8_t oc_div, uint8_t oc_ref_div);
+
+static bool get_working_pll_freq(uint8_t *reference_data, bool is_flash, uint32_t *out_max_freq, uint32_t *out_min_freq)
+{
+    uint8_t read_data[SPI_TIMING_TEST_DATA_LEN] = {0};
+    rtc_cpu_freq_config_t previous_config;
+    rtc_clk_cpu_freq_get_config(&previous_config);
+
+    uint32_t big_num = MSPI_TIMING_PLL_FREQ_SCAN_RANGE_MHZ_MAX * 2;  //This number should be larger than MSPI_TIMING_PLL_FREQ_SCAN_RANGE_MHZ_MAX, for error handling
+    uint32_t max_freq = 0;
+    uint32_t min_freq = big_num;
+    rtc_xtal_freq_t xtal_freq = rtc_clk_xtal_freq_get();
+
+    for (int pll_mhz_tuning = MSPI_TIMING_PLL_FREQ_SCAN_RANGE_MHZ_MIN; pll_mhz_tuning <= MSPI_TIMING_PLL_FREQ_SCAN_RANGE_MHZ_MAX; pll_mhz_tuning += 8) {
+        /**
+         * pll_mhz = xtal_mhz * (oc_div + 4) / (oc_ref_div + 1)
+         */
+        rtc_clk_configure_pll(xtal_freq, pll_mhz_tuning, ((pll_mhz_tuning / 4) - 4), 9);
+
+        memset(read_data, 0, SPI_TIMING_TEST_DATA_LEN);
+        if (is_flash) {
+            spi_timing_config_flash_read_data(1, read_data, SPI_TIMING_FLASH_TEST_DATA_ADDR, SPI_TIMING_TEST_DATA_LEN);
+        } else {
+            spi_timing_config_psram_read_data(1, read_data, SPI_TIMING_PSRAM_TEST_DATA_ADDR, SPI_TIMING_TEST_DATA_LEN);
+        }
+
+        if (memcmp(read_data, reference_data, SPI_TIMING_TEST_DATA_LEN) == 0) {
+            max_freq = MAX(pll_mhz_tuning, max_freq);
+            min_freq = MIN(pll_mhz_tuning, min_freq);
+
+            //Continue to find successful cases
+            continue;
+        }
+
+        if (max_freq != 0) {
+            //The first fail case after successful case(s) is the end
+            break;
+        }
+
+        //If no break, no successful case found, continue to find successful cases
+    }
+
+    //restore PLL config
+    rtc_clk_bbpll_configure(xtal_freq, previous_config.source_freq_mhz);
+
+    *out_max_freq = max_freq;
+    *out_min_freq = min_freq;
+
+    return (max_freq != 0);
+}
+#endif  //Frequency Scanning
+
 #if SPI_TIMING_FLASH_DTR_MODE || SPI_TIMING_PSRAM_DTR_MODE
-static uint32_t select_best_tuning_config_dtr(spi_timing_config_t *config, uint32_t consecutive_length, uint32_t end)
+static uint32_t select_best_tuning_config_dtr(spi_timing_config_t *config, uint32_t consecutive_length, uint32_t end, uint8_t *reference_data, bool is_flash)
 {
 #if (SPI_TIMING_CORE_CLOCK_MHZ == 160)
     //Core clock 160M DTR best point scheme
-    uint32_t best_point;
+    (void) reference_data;
+    (void) is_flash;
+    uint32_t best_point = 0;
 
-    //Define these magic number in macros in `spi_timing_config.h`. TODO: IDF-3663
+    //These numbers will probably be same on other chips, if this version of algorithm is utilised
     if (consecutive_length <= 2 || consecutive_length >= 6) {
         //tuning is FAIL, select default point, and generate a warning
         best_point = config->default_config_id;
@@ -199,6 +257,41 @@ static uint32_t select_best_tuning_config_dtr(spi_timing_config_t *config, uint3
     }
 
     return best_point;
+
+#elif (SPI_TIMING_CORE_CLOCK_MHZ == 240)
+
+    uint32_t best_point = 0;
+    uint32_t current_point = end + 1 - consecutive_length;
+    bool ret = false;
+
+    //This `max_freq` is the max pll frequency that per MSPI timing tuning config can work
+    uint32_t max_freq = 0;
+    uint32_t temp_max_freq = 0;
+    uint32_t temp_min_freq = 0;
+
+    for (; current_point <= end; current_point++) {
+        if (is_flash) {
+            spi_timing_config_flash_set_tuning_regs(&(config->tuning_config_table[current_point]));
+        } else {
+            spi_timing_config_psram_set_tuning_regs(&(config->tuning_config_table[current_point]));
+        }
+
+        ret = get_working_pll_freq(reference_data, is_flash, &temp_max_freq, &temp_min_freq);
+        if (ret && temp_min_freq <= MSPI_TIMING_PLL_FREQ_SCAN_THRESH_MHZ_LOW && temp_max_freq >= MSPI_TIMING_PLL_FREQ_SCAN_THRESH_MHZ_HIGH && temp_max_freq > max_freq) {
+            max_freq = temp_max_freq;
+            best_point = current_point;
+        }
+        ESP_EARLY_LOGD(TAG, "sample point %d, max pll is %d mhz, min pll is %d\n", current_point, temp_max_freq, temp_min_freq);
+    }
+    if (max_freq == 0) {
+        ESP_EARLY_LOGW(TAG, "freq scan tuning fail, best point is fallen back to index %d", end + 1 - consecutive_length);
+        best_point = end + 1 - consecutive_length;
+    } else {
+        ESP_EARLY_LOGD(TAG, "freq scan success, max pll is %dmhz, best point is index %d", max_freq, best_point);
+    }
+
+    return best_point;
+
 #else
     //won't reach here
     abort();
@@ -231,19 +324,19 @@ static uint32_t select_best_tuning_config_str(spi_timing_config_t *config, uint3
 }
 #endif
 
-static void select_best_tuning_config(spi_timing_config_t *config, uint32_t consecutive_length, uint32_t end, bool is_flash)
+static void select_best_tuning_config(spi_timing_config_t *config, uint32_t consecutive_length, uint32_t end, uint8_t *reference_data, bool is_flash)
 {
     uint32_t best_point = 0;
     if (is_flash) {
 #if SPI_TIMING_FLASH_DTR_MODE
-        best_point = select_best_tuning_config_dtr(config, consecutive_length, end);
+        best_point = select_best_tuning_config_dtr(config, consecutive_length, end, reference_data, is_flash);
 #elif SPI_TIMING_FLASH_STR_MODE
         best_point = select_best_tuning_config_str(config, consecutive_length, end);
 #endif
         s_flash_best_timing_tuning_config = config->tuning_config_table[best_point];
     } else {
 #if SPI_TIMING_PSRAM_DTR_MODE
-        best_point = select_best_tuning_config_dtr(config, consecutive_length, end);
+        best_point = select_best_tuning_config_dtr(config, consecutive_length, end, reference_data, is_flash);
 #elif SPI_TIMING_PSRAM_STR_MODE
         best_point = select_best_tuning_config_str(config, consecutive_length, end);
 #endif
@@ -266,7 +359,7 @@ static void do_tuning(uint8_t *reference_data, spi_timing_config_t *timing_confi
     init_spi1_for_tuning(is_flash);
     sweep_for_success_sample_points(reference_data, timing_config, is_flash, sample_result);
     find_max_consecutive_success_points(sample_result, SPI_TIMING_CONFIG_NUM_DEFAULT, &consecutive_length, &last_success_point);
-    select_best_tuning_config(timing_config, consecutive_length, last_success_point, is_flash);
+    select_best_tuning_config(timing_config, consecutive_length, last_success_point, reference_data, is_flash);
 }
 #endif  //#if SPI_TIMING_FLASH_NEEDS_TUNING || SPI_TIMING_PSRAM_NEEDS_TUNING
 

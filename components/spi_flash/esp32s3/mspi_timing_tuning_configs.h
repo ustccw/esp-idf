@@ -54,3 +54,21 @@
 #define MSPI_TIMING_PSRAM_CONFIG_TABLE_CORE_CLK_120M_MODULE_CLK_120M_STR_MODE        {{2, 0, 1}, {0, 0, 0}, {2, 2, 2}, {1, 0, 1}, {2, 0, 2}, {0, 0, 1}, {2, 2, 3}, {1, 0, 2}, {2, 0, 3}, {0, 0, 2}, {2, 2, 4}, {1, 0, 3}}
 #define MSPI_TIMING_PSRAM_CONFIG_NUM_CORE_CLK_120M_MODULE_CLK_120M_STR_MODE          12
 #define MSPI_TIMING_PSRAM_DEFAULT_CONFIG_ID_CORE_CLK_120M_MODULE_CLK_120M_STR_MODE   2
+
+//PSRAM: core clock 240M, module clock 120M, DTR mode
+#define MSPI_TIMING_PSRAM_CONFIG_TABLE_CORE_CLK_240M_MODULE_CLK_120M_DTR_MODE        {{0, 0, 0}, {4, 1, 2}, {1, 0, 1}, {4, 0, 2}, {0, 0, 1}, {4, 1, 3}, {1, 0, 2}, {4, 0, 3}, {0, 0, 2}, {4, 1, 4}, {1, 0, 3}, {4, 0, 4}, {0, 0, 3}, {4, 1, 5}}
+#define MSPI_TIMING_PSRAM_CONFIG_NUM_CORE_CLK_240M_MODULE_CLK_120M_DTR_MODE          14
+#define MSPI_TIMING_PSRAM_DEFAULT_CONFIG_ID_CORE_CLK_240M_MODULE_CLK_120M_DTR_MODE   1
+
+
+//------------------------------------------Frequency Scanning Related-----------------------------------------------//
+/**
+ * On ESP32S3, only module clock 120M, DDR mode needs frequency scan. Frequency scanning is to get the max workable PLL
+ * frequency under each successfull timing tuning configuration. PLL frequency may fluctuate under high temperature,
+ * this method is to get the tuning configuration that can work under higher PLL frequency.
+ */
+#define MSPI_TIMING_PLL_FREQ_SCAN_RANGE_MHZ_MIN                                      440
+#define MSPI_TIMING_PLL_FREQ_SCAN_RANGE_MHZ_MAX                                      600
+#define MSPI_TIMING_PLL_FREQ_SCAN_THRESH_MHZ_LOW                                     448
+#define MSPI_TIMING_PLL_FREQ_SCAN_THRESH_MHZ_HIGH                                    520
+#define MSPI_TIMING_PLL_FREQ_SCAN_STEP_MHZ_MODULE_CLK_120M                           8
