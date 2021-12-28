@@ -123,7 +123,7 @@ static void init_spi1_for_tuning(bool is_flash)
  * We use different SPI1 timing tuning config to read data to see if current MSPI sampling is successful.
  * The sampling result will be stored in an array. In this array, successful item will be 1, failed item will be 0.
  */
-static void sweep_for_success_sample_points(uint8_t *reference_data, const spi_timing_config_t *config, bool is_flash, uint8_t *out_array)
+static void sweep_for_success_sample_points(const uint8_t *reference_data, const spi_timing_config_t *config, bool is_flash, uint8_t *out_array)
 {
     uint32_t config_idx = 0;
     uint8_t read_data[SPI_TIMING_TEST_DATA_LEN] = {0};
@@ -182,7 +182,7 @@ static void find_max_consecutive_success_points(uint8_t *array, uint32_t size, u
 extern void rtc_clk_bbpll_configure(rtc_xtal_freq_t xtal_freq, int pll_freq);
 extern void rtc_clk_configure_pll(rtc_xtal_freq_t xtal_freq, int pll_freq, uint8_t oc_div, uint8_t oc_ref_div);
 
-static bool get_working_pll_freq(uint8_t *reference_data, bool is_flash, uint32_t *out_max_freq, uint32_t *out_min_freq)
+static bool get_working_pll_freq(const uint8_t *reference_data, bool is_flash, uint32_t *out_max_freq, uint32_t *out_min_freq)
 {
     uint8_t read_data[SPI_TIMING_TEST_DATA_LEN] = {0};
     rtc_cpu_freq_config_t previous_config;
@@ -233,7 +233,7 @@ static bool get_working_pll_freq(uint8_t *reference_data, bool is_flash, uint32_
 #endif  //Frequency Scanning
 
 #if SPI_TIMING_FLASH_DTR_MODE || SPI_TIMING_PSRAM_DTR_MODE
-static uint32_t select_best_tuning_config_dtr(spi_timing_config_t *config, uint32_t consecutive_length, uint32_t end, uint8_t *reference_data, bool is_flash)
+static uint32_t select_best_tuning_config_dtr(spi_timing_config_t *config, uint32_t consecutive_length, uint32_t end, const uint8_t *reference_data, bool is_flash)
 {
 #if (SPI_TIMING_CORE_CLOCK_MHZ == 160)
     //Core clock 160M DTR best point scheme
@@ -324,7 +324,7 @@ static uint32_t select_best_tuning_config_str(spi_timing_config_t *config, uint3
 }
 #endif
 
-static void select_best_tuning_config(spi_timing_config_t *config, uint32_t consecutive_length, uint32_t end, uint8_t *reference_data, bool is_flash)
+static void select_best_tuning_config(spi_timing_config_t *config, uint32_t consecutive_length, uint32_t end, const uint8_t *reference_data, bool is_flash)
 {
     uint32_t best_point = 0;
     if (is_flash) {
@@ -344,7 +344,7 @@ static void select_best_tuning_config(spi_timing_config_t *config, uint32_t cons
     }
 }
 
-static void do_tuning(uint8_t *reference_data, spi_timing_config_t *timing_config, bool is_flash)
+static void do_tuning(const uint8_t *reference_data, spi_timing_config_t *timing_config, bool is_flash)
 {
     /**
      * We use SPI1 to tune the timing:
