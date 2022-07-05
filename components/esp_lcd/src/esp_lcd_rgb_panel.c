@@ -84,7 +84,7 @@ struct esp_rgb_panel_t {
     uint32_t src_clk_hz;   // Peripheral source clock resolution
     esp_lcd_rgb_timing_t timings;   // RGB timing parameters (e.g. pclk, sync pulse, porch width)
     gdma_channel_handle_t dma_chan; // DMA channel handle
-    esp_lcd_rgb_panel_frame_trans_done_cb_t on_frame_trans_done; // Callback, invoked after frame trans done
+    esp_lcd_rgb_panel_vsync_cb_t on_frame_trans_done; // Callback, invoked after frame trans done
     void *user_ctx;                // Reserved user's data of callback functions
     int x_gap;                      // Extra gap in x coordinate, it's used when calculate the flush window
     int y_gap;                      // Extra gap in y coordinate, it's used when calculate the flush window
@@ -175,7 +175,7 @@ esp_err_t esp_lcd_new_rgb_panel(const esp_lcd_rgb_panel_config_t *rgb_panel_conf
     lcd_ll_enable_interrupt(rgb_panel->hal.dev, LCD_LL_EVENT_VSYNC_END, false); // disable all interrupts
     lcd_ll_clear_interrupt_status(rgb_panel->hal.dev, UINT32_MAX); // clear pending interrupt
     // install DMA service
-    rgb_panel->flags.stream_mode = !rgb_panel_config->flags.relax_on_idle;
+    rgb_panel->flags.stream_mode = !rgb_panel_config->flags.refresh_on_demand;
     ret = lcd_rgb_panel_create_trans_link(rgb_panel);
     ESP_GOTO_ON_ERROR(ret, err, TAG, "install DMA failed");
     // configure GPIO
@@ -239,6 +239,24 @@ esp_err_t esp_rgb_panel_set_pclk(esp_lcd_panel_handle_t panel, uint32_t freq_hz)
     rgb_panel->flags.need_update_pclk = true;
     rgb_panel->timings.pclk_hz = freq_hz;
     portEXIT_CRITICAL(&rgb_panel->spinlock);
+    return ESP_OK;
+}
+
+esp_err_t esp_lcd_rgb_panel_start_transmission(esp_lcd_panel_t *panel)
+{
+    esp_rgb_panel_t *rgb_panel = __containerof(panel, esp_rgb_panel_t, base);
+
+    if (!rgb_panel->flags.stream_mode) {
+        lcd_rgb_panel_start_transmission(rgb_panel);
+    }
+    return ESP_OK;
+}
+
+esp_err_t esp_lcd_rgb_panel_register_event_callbacks(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_callbacks_t *callbacks, void *user_ctx)
+{
+    ESP_RETURN_ON_FALSE(panel && callbacks, ESP_ERR_INVALID_ARG, TAG, "invalid argument");
+    esp_rgb_panel_t *rgb_panel = __containerof(panel, esp_rgb_panel_t, base);
+    rgb_panel->on_frame_trans_done = callbacks->on_vsync;
     return ESP_OK;
 }
 
@@ -350,9 +368,9 @@ static esp_err_t rgb_panel_draw_bitmap(esp_lcd_panel_t *panel, int x_start, int 
     }
 
     // restart the new transmission
-    if (!rgb_panel->flags.stream_mode) {
-        lcd_rgb_panel_start_transmission(rgb_panel);
-    }
+    // if (!rgb_panel->flags.stream_mode) {
+    //     lcd_rgb_panel_start_transmission(rgb_panel);
+    // }
 
     return ESP_OK;
 }

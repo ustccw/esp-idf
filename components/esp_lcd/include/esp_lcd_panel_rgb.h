@@ -76,14 +76,23 @@ typedef struct {
 } esp_lcd_rgb_panel_event_data_t;
 
 /**
- * @brief Declare the prototype of the function that will be invoked when panel IO finishes transferring color data
+ * @brief RGB LCD VSYNC event callback prototype
  *
  * @param[in] panel LCD panel handle, returned from `esp_lcd_new_rgb_panel()`
  * @param[in] edata Panel event data, fed by driver
- * @param[in] user_ctx User data, passed from `esp_lcd_rgb_panel_config_t`
+ * @param[in] user_ctx User data, passed from `esp_lcd_rgb_panel_register_event_callbacks()`
  * @return Whether a high priority task has been waken up by this function
  */
-typedef bool (*esp_lcd_rgb_panel_frame_trans_done_cb_t)(esp_lcd_panel_handle_t panel, esp_lcd_rgb_panel_event_data_t *edata, void *user_ctx);
+typedef bool (*esp_lcd_rgb_panel_vsync_cb_t)(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t *edata, void *user_ctx);
+
+/**
+ * @brief Group of supported RGB LCD panel callbacks
+ * @note The callbacks are all running under ISR environment
+ * @note When CONFIG_LCD_RGB_ISR_IRAM_SAFE is enabled, the callback itself and functions called by it should be placed in IRAM.
+ */
+typedef struct {
+    esp_lcd_rgb_panel_vsync_cb_t on_vsync;                  /*!< VSYNC event callback */
+} esp_lcd_rgb_panel_event_callbacks_t;
 
 /**
  * @brief LCD RGB panel configuration structure
@@ -100,11 +109,11 @@ typedef struct {
     int pclk_gpio_num;            /*!< GPIO used for PCLK signal */
     int data_gpio_nums[SOC_LCD_RGB_DATA_WIDTH]; /*!< GPIOs used for data lines */
     int disp_gpio_num; /*!< GPIO used for display control signal, set to -1 if it's not used */
-    esp_lcd_rgb_panel_frame_trans_done_cb_t on_frame_trans_done; /*!< Callback invoked when one frame buffer has transferred done */
+    esp_lcd_rgb_panel_vsync_cb_t on_frame_trans_done; /*!< Callback invoked when one frame buffer has transferred done */
     void *user_ctx; /*!< User data which would be passed to on_frame_trans_done's user_ctx */
     struct {
         unsigned int disp_active_low: 1; /*!< If this flag is enabled, a low level of display control signal can turn the screen on; vice versa */
-        unsigned int relax_on_idle: 1;   /*!< If this flag is enabled, the host won't refresh the LCD if nothing changed in host's frame buffer (this is usefull for LCD with built-in GRAM) */
+        unsigned int refresh_on_demand: 1;   /*!< If this flag is enabled, the host won't refresh the LCD if nothing changed in host's frame buffer (this is usefull for LCD with built-in GRAM) */
         unsigned int fb_in_psram: 1;     /*!< If this flag is enabled, the frame buffer will be allocated from PSRAM preferentially */
     } flags;                             /*!< LCD RGB panel configuration flags */
 } esp_lcd_rgb_panel_config_t;
@@ -139,6 +148,21 @@ esp_err_t esp_lcd_new_rgb_panel(const esp_lcd_rgb_panel_config_t *rgb_panel_conf
  *          - ESP_OK                  on success
  */
 esp_err_t esp_rgb_panel_set_pclk(esp_lcd_panel_handle_t panel, uint32_t freq_hz);
+
+esp_err_t esp_lcd_rgb_panel_start_transmission(esp_lcd_panel_handle_t panel);
+
+/**
+ * @brief Register LCD RGB panel event callbacks
+ *
+ * @param[in] panel LCD panel handle, returned from `esp_lcd_new_rgb_panel()`
+ * @param[in] callbacks Group of callback functions
+ * @param[in] user_ctx User data, which will be passed to the callback functions directly
+ * @return
+ *      - ESP_OK: Set event callbacks successfully
+ *      - ESP_ERR_INVALID_ARG: Set event callbacks failed because of invalid argument
+ *      - ESP_FAIL: Set event callbacks failed because of other error
+ */
+esp_err_t esp_lcd_rgb_panel_register_event_callbacks(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_callbacks_t *callbacks, void *user_ctx);
 
 #endif // SOC_LCD_RGB_SUPPORTED
 

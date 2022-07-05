@@ -67,7 +67,7 @@ static esp_lcd_panel_handle_t test_rgb_panel_initialization(bool stream_mode, es
         .on_frame_trans_done = cb,
         .user_ctx = user_data,
         .flags.fb_in_psram = 1, // allocate frame buffer in PSRAM
-        .flags.relax_on_idle = !stream_mode,
+        .flags.refresh_on_demand = !stream_mode,
     };
 
     TEST_ESP_OK(esp_lcd_new_rgb_panel(&panel_config, &panel_handle));
