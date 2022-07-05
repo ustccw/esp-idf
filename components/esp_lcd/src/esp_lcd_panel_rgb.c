@@ -360,6 +360,17 @@ esp_err_t esp_lcd_rgb_panel_get_frame_buffer(esp_lcd_panel_handle_t panel, uint3
     return ESP_OK;
 }
 
+esp_err_t esp_lcd_rgb_panel_start_transmission(esp_lcd_panel_handle_t panel)
+{
+    esp_rgb_panel_t *rgb_panel = __containerof(panel, esp_rgb_panel_t, base);
+
+    if (!rgb_panel->flags.stream_mode) {
+        lcd_rgb_panel_start_transmission(rgb_panel);
+    }
+    return ESP_OK;
+}
+
+
 static esp_err_t rgb_panel_del(esp_lcd_panel_t *panel)
 {
     esp_rgb_panel_t *rgb_panel = __containerof(panel, esp_rgb_panel_t, base);
@@ -478,9 +489,6 @@ static esp_err_t rgb_panel_draw_bitmap(esp_lcd_panel_t *panel, int x_start, int 
             // the DMA will convey the new frame buffer next time
             rgb_panel->dma_nodes[rgb_panel->num_dma_nodes - 1].next = rgb_panel->dma_links[rgb_panel->cur_fb_index];
             rgb_panel->dma_nodes[rgb_panel->num_dma_nodes * 2 - 1].next = rgb_panel->dma_links[rgb_panel->cur_fb_index];
-        } else {
-            // manually start the transmission in non-stream mode
-            lcd_rgb_panel_start_transmission(rgb_panel);
         }
     }
 

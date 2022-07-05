@@ -196,6 +196,8 @@ esp_err_t esp_lcd_rgb_panel_set_pclk(esp_lcd_panel_handle_t panel, uint32_t freq
  */
 esp_err_t esp_lcd_rgb_panel_get_frame_buffer(esp_lcd_panel_handle_t panel, uint32_t fb_num, void **fb0, ...);
 
+esp_err_t esp_lcd_rgb_panel_start_transmission(esp_lcd_panel_handle_t panel);
+
 #endif // SOC_LCD_RGB_SUPPORTED
 
 #ifdef __cplusplus
