@@ -196,6 +196,16 @@ esp_err_t esp_lcd_rgb_panel_set_pclk(esp_lcd_panel_handle_t panel, uint32_t freq
  */
 esp_err_t esp_lcd_rgb_panel_get_frame_buffer(esp_lcd_panel_handle_t panel, uint32_t fb_num, void **fb0, ...);
 
+/**
+ * @brief Control RGB LCD panel to start transmission
+ *
+ * @note This function should be used when `refresh_on_demand = 1`
+ *
+ * @param[in] panel LCD panel handle, returned from `esp_lcd_new_rgb_panel()`
+ * @return
+ *      - ESP_ERR_INVALID_ARG: Get frame buffer address failed because of invalid argument
+ *      - ESP_OK: Get frame buffer address successfully
+ */
 esp_err_t esp_lcd_rgb_panel_start_transmission(esp_lcd_panel_handle_t panel);
 
 #endif // SOC_LCD_RGB_SUPPORTED

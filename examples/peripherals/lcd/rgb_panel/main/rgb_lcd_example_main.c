@@ -16,6 +16,7 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "lvgl.h"
+#include "lv_demos.h"
 
 static const char *TAG = "example";
 
@@ -25,6 +26,13 @@ static const char *TAG = "example";
 #define EXAMPLE_LCD_PIXEL_CLOCK_HZ     (18 * 1000 * 1000)
 #define EXAMPLE_LCD_BK_LIGHT_ON_LEVEL  1
 #define EXAMPLE_LCD_BK_LIGHT_OFF_LEVEL !EXAMPLE_LCD_BK_LIGHT_ON_LEVEL
+#define EXAMPLE_LCD_HSYC_BACK_PORCH    40
+#define EXAMPLE_LCD_HSYC_FRONT_PORCH   20
+#define EXAMPLE_LCD_HSYC_PLUS_WIDTH    1
+#define EXAMPLE_LCD_VSYC_BACK_PORCH    8
+#define EXAMPLE_LCD_VSYC_FRONT_PORCH   4
+#define EXAMPLE_LCD_VSYC_PLUS_WIDTH    1
+#define EXAMPLE_LCD_PCLK_ACTIVE_NEG    true
 #define EXAMPLE_PIN_NUM_BK_LIGHT       4
 #define EXAMPLE_PIN_NUM_HSYNC          46
 #define EXAMPLE_PIN_NUM_VSYNC          3
@@ -53,11 +61,12 @@ static const char *TAG = "example";
 #define EXAMPLE_LCD_V_RES              480
 
 #define EXAMPLE_LVGL_TICK_PERIOD_MS    2
+#define EXAMPLE_LVGL_BUFFER_MALLOC     MALLOC_CAP_INTERNAL
 
-// we use two semaphores to sync the VSYNC event and the LVGL task, to avoid potential tearing effect
-#if CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM
-SemaphoreHandle_t sem_vsync_end;
-SemaphoreHandle_t sem_gui_ready;
+// we use two semaphores to sync the last area's flushing of lvgl and the RGB LCD vsync, to avoid potential tearing effect
+#if CONFIG_EXAMPLE_AVOID_TEAR_WITH_SYNC_FLUSH
+static SemaphoreHandle_t flush_end = NULL;
+static SemaphoreHandle_t trans_ready = NULL;
 #endif
 
 extern void example_lvgl_demo_ui(lv_obj_t *scr);
@@ -65,10 +74,9 @@ extern void example_lvgl_demo_ui(lv_obj_t *scr);
 static bool example_on_vsync_event(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t *event_data, void *user_data)
 {
     BaseType_t high_task_awoken = pdFALSE;
-#if CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM
-    if (xSemaphoreTakeFromISR(sem_gui_ready, &high_task_awoken) == pdTRUE) {
-        xSemaphoreGiveFromISR(sem_vsync_end, &high_task_awoken);
-    }
+#if CONFIG_EXAMPLE_AVOID_TEAR_WITH_SYNC_FLUSH
+    xSemaphoreGiveFromISR(flush_end, &high_task_awoken);
+    xSemaphoreGiveFromISR(trans_ready, &high_task_awoken);
 #endif
     return high_task_awoken == pdTRUE;
 }
@@ -80,12 +88,17 @@ static void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_
     int offsetx2 = area->x2;
     int offsety1 = area->y1;
     int offsety2 = area->y2;
-#if CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM
-    xSemaphoreGive(sem_gui_ready);
-    xSemaphoreTake(sem_vsync_end, portMAX_DELAY);
-#endif
     // pass the draw buffer to the driver
     esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, color_map);
+
+#if CONFIG_EXAMPLE_AVOID_TEAR_WITH_SYNC_FLUSH
+    /* Check whether current area is last one */
+    if (lv_disp_flush_is_last(drv)) {
+        xSemaphoreTake(flush_end, portMAX_DELAY);               // Wait until rgb lcd vsync finish
+        esp_lcd_rgb_panel_start_transmission(panel_handle);     // Manually start rgb lcd transmission
+    }
+#endif
+
     lv_disp_flush_ready(drv);
 }
 
@@ -100,12 +113,14 @@ void app_main(void)
     static lv_disp_draw_buf_t disp_buf; // contains internal graphic buffer(s) called draw buffer(s)
     static lv_disp_drv_t disp_drv;      // contains callback functions
 
-#if CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM
+#if CONFIG_EXAMPLE_AVOID_TEAR_WITH_SYNC_FLUSH
     ESP_LOGI(TAG, "Create semaphores");
-    sem_vsync_end = xSemaphoreCreateBinary();
-    assert(sem_vsync_end);
-    sem_gui_ready = xSemaphoreCreateBinary();
-    assert(sem_gui_ready);
+    flush_end = xSemaphoreCreateBinary();
+    assert(flush_end);
+    xSemaphoreGive(flush_end);
+    trans_ready = xSemaphoreCreateBinary();
+    assert(trans_ready);
+    xSemaphoreGive(trans_ready);
 #endif
 
 #if EXAMPLE_PIN_NUM_BK_LIGHT >= 0
@@ -120,7 +135,7 @@ void app_main(void)
     ESP_LOGI(TAG, "Install RGB LCD panel driver");
     esp_lcd_panel_handle_t panel_handle = NULL;
     esp_lcd_rgb_panel_config_t panel_config = {
-        .data_width = 16, // RGB565 in parallel mode, thus 16bit in width
+        .data_width = 16,               // RGB565 in parallel mode, thus 16bit in width
         .psram_trans_align = 64,
 #if CONFIG_EXAMPLE_USE_BOUNCE_BUFFER
         .bounce_buffer_size_px = 10 * EXAMPLE_LCD_H_RES,
@@ -153,19 +168,22 @@ void app_main(void)
             .pclk_hz = EXAMPLE_LCD_PIXEL_CLOCK_HZ,
             .h_res = EXAMPLE_LCD_H_RES,
             .v_res = EXAMPLE_LCD_V_RES,
-            // The following parameters should refer to LCD spec
-            .hsync_back_porch = 40,
-            .hsync_front_porch = 20,
-            .hsync_pulse_width = 1,
-            .vsync_back_porch = 8,
-            .vsync_front_porch = 4,
-            .vsync_pulse_width = 1,
-            .flags.pclk_active_neg = true,
+            /* The following parameters should refer to LCD spec */
+            .hsync_back_porch = EXAMPLE_LCD_HSYC_BACK_PORCH,
+            .hsync_front_porch = EXAMPLE_LCD_HSYC_FRONT_PORCH,
+            .hsync_pulse_width = EXAMPLE_LCD_HSYC_PLUS_WIDTH,
+            .vsync_back_porch = EXAMPLE_LCD_VSYC_BACK_PORCH,
+            .vsync_front_porch = EXAMPLE_LCD_VSYC_FRONT_PORCH,
+            .vsync_pulse_width = EXAMPLE_LCD_VSYC_PLUS_WIDTH,
+            .flags.pclk_active_neg = EXAMPLE_LCD_PCLK_ACTIVE_NEG,
         },
-        .flags.fb_in_psram = true, // allocate frame buffer in PSRAM
+#if CONFIG_EXAMPLE_AVOID_TEAR_WITH_SYNC_FLUSH
+        .flags.refresh_on_demand = 1,   // Mannually control refresh operation
+#endif
+        .flags.fb_in_psram = true,      // allocate frame buffer in PSRAM
 #if CONFIG_EXAMPLE_DOUBLE_FB
-        .flags.double_fb = true,   // allocate double frame buffer
-#endif // CONFIG_EXAMPLE_DOUBLE_FB
+        .flags.double_fb = true,        // allocate double frame buffer
+#endif
     };
     ESP_ERROR_CHECK(esp_lcd_new_rgb_panel(&panel_config, &panel_handle));
 
@@ -194,13 +212,12 @@ void app_main(void)
     // initialize LVGL draw buffers
     lv_disp_draw_buf_init(&disp_buf, buf1, buf2, EXAMPLE_LCD_H_RES * EXAMPLE_LCD_V_RES);
 #else
-    ESP_LOGI(TAG, "Allocate separate LVGL draw buffers from PSRAM");
-    buf1 = heap_caps_malloc(EXAMPLE_LCD_H_RES * 100 * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+    ESP_LOGI(TAG, "Allocate single LVGL draw buffer");
+    buf1 = heap_caps_malloc(EXAMPLE_LCD_H_RES * 100 * sizeof(lv_color_t), EXAMPLE_LVGL_BUFFER_MALLOC);
     assert(buf1);
-    buf2 = heap_caps_malloc(EXAMPLE_LCD_H_RES * 100 * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
-    assert(buf2);
+    (void)buf2;
     // initialize LVGL draw buffers
-    lv_disp_draw_buf_init(&disp_buf, buf1, buf2, EXAMPLE_LCD_H_RES * 100);
+    lv_disp_draw_buf_init(&disp_buf, buf1, NULL, EXAMPLE_LCD_H_RES * 100);
 #endif // CONFIG_EXAMPLE_DOUBLE_FB
 
     ESP_LOGI(TAG, "Register display driver to LVGL");
@@ -213,7 +230,7 @@ void app_main(void)
 #if CONFIG_EXAMPLE_DOUBLE_FB
     disp_drv.full_refresh = true; // the full_refresh mode can maintain the synchronization between the two frame buffers
 #endif
-    lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
+    lv_disp_drv_register(&disp_drv);
 
     ESP_LOGI(TAG, "Install LVGL tick timer");
     // Tick interface for LVGL (using esp_timer to generate 2ms periodic event)
@@ -225,14 +242,23 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, EXAMPLE_LVGL_TICK_PERIOD_MS * 1000));
 
-    ESP_LOGI(TAG, "Display LVGL Scatter Chart");
-    lv_obj_t *scr = lv_disp_get_scr_act(disp);
-    example_lvgl_demo_ui(scr);
+    ESP_LOGI(TAG, "Display LVGL Music Demo");
+    lv_demo_music();
 
     while (1) {
         // raise the task priority of LVGL and/or reduce the handler period can improve the performance
         vTaskDelay(pdMS_TO_TICKS(10));
-        // The task running lv_timer_handler should have lower priority than that running `lv_tick_inc`
-        lv_timer_handler();
+        // The task running lv_task_handler should have lower priority than that running `lv_tick_inc`
+        lv_task_handler();
+#if CONFIG_EXAMPLE_AVOID_TEAR_WITH_SYNC_FLUSH
+        if (xSemaphoreTake(flush_end, 0) == pdTRUE) {
+            if (xSemaphoreTake(trans_ready, 0) == pdTRUE) {
+                esp_lcd_rgb_panel_start_transmission(panel_handle);
+            }
+            else {
+                xSemaphoreGive(flush_end);
+            }
+        }
+#endif
     }
 }

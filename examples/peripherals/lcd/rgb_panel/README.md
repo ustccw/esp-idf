@@ -5,12 +5,8 @@
 
 [esp_lcd](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/lcd.html) supports RGB interfaced LCD panel, with one or two frame buffer(s) managed by the driver itself.
 
-This example shows the general process of installing an RGB panel driver, and displays a scatter chart on the screen based on the LVGL library. For more information about porting the LVGL library, please refer to [official porting guide](https://docs.lvgl.io/master/porting/index.html). This example uses two kinds of **buffering mode** based on the number of frame buffers:
-
-| Number of Frame Buffers | LVGL buffering mode | Way to avoid tear effect                                                                                    |
-|-------------------------|---------------------|-------------------------------------------------------------------------------------------------------------|
-| 1                       | Two buffers         | Extra synchronization mechanism is needed, e.g. using semaphore.                                            |
-| 2                       | Full refresh        | There's no intersection between writing to an offline frame buffer and reading from an online frame buffer. |
+This example shows the general process of installing an RGB panel driver, and displays a scatter chart on the screen based on the LVGL library. For more information about porting the LVGL library, please refer to [official porting guide](https://docs.lvgl.io/master/porting/index.html). This example uses a synchronization scheme with two semaphores to solve the tearing problem:
+![synchronization scheme](./tearing_fix.png)
 
 ## How to use the example
 
@@ -48,9 +44,9 @@ The connection between ESP Board and the LCD is as follows:
                                        +-------------------+
 ```
 
-The GPIO number used by this example can be changed in [lvgl_example_main.c](main/rgb_lcd_example_main.c).
+The GPIO number used by this example can be changed in [rgb_lcd_example_main.c](main/rgb_lcd_example_main.c).
 
-Especially, please pay attention to the level used to turn on the LCD backlight, some LCD module needs a low level to turn it on, while others take a high level. You can change the backlight level macro `EXAMPLE_LCD_BK_LIGHT_ON_LEVEL` in [lvgl_example_main.c](main/rgb_lcd_example_main.c).
+Especially, please pay attention to the level used to turn on the LCD backlight, some LCD module needs a low level to turn it on, while others take a high level. You can change the backlight level macro `EXAMPLE_LCD_BK_LIGHT_ON_LEVEL` in [rgb_lcd_example_main.c](main/rgb_lcd_example_main.c).
 
 If the RGB LCD panel only supports DE mode, you can even bypass the `HSYNC` and `VSYNC` signals, by assigning `EXAMPLE_PIN_NUM_HSYNC` and `EXAMPLE_PIN_NUM_VSYNC` with `-1`.
 

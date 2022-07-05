@@ -11,8 +11,9 @@ menu "Example Configuration"
         help
             Enable bounce buffer mode can achieve higher PCLK frequency at the cost of higher CPU consumption.
 
-    config EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM
+    config EXAMPLE_AVOID_TEAR_WITH_SYNC_FLUSH
         depends on !EXAMPLE_DOUBLE_FB
+        depends on !EXAMPLE_USE_BOUNCE_BUFFER
         bool "Avoid tearing effect"
         default "y"
         help
