@@ -26,12 +26,18 @@ static const char *TAG = "example";
 #define EXAMPLE_LCD_PIXEL_CLOCK_HZ     (18 * 1000 * 1000)
 #define EXAMPLE_LCD_BK_LIGHT_ON_LEVEL  1
 #define EXAMPLE_LCD_BK_LIGHT_OFF_LEVEL !EXAMPLE_LCD_BK_LIGHT_ON_LEVEL
+// #define EXAMPLE_LCD_HSYC_BACK_PORCH    40
+// #define EXAMPLE_LCD_HSYC_FRONT_PORCH   20
+// #define EXAMPLE_LCD_HSYC_PLUS_WIDTH    1
+// #define EXAMPLE_LCD_VSYC_BACK_PORCH    8
+// #define EXAMPLE_LCD_VSYC_FRONT_PORCH   4
+// #define EXAMPLE_LCD_VSYC_PLUS_WIDTH    1
 #define EXAMPLE_LCD_HSYC_BACK_PORCH    40
-#define EXAMPLE_LCD_HSYC_FRONT_PORCH   20
-#define EXAMPLE_LCD_HSYC_PLUS_WIDTH    1
-#define EXAMPLE_LCD_VSYC_BACK_PORCH    8
-#define EXAMPLE_LCD_VSYC_FRONT_PORCH   4
-#define EXAMPLE_LCD_VSYC_PLUS_WIDTH    1
+#define EXAMPLE_LCD_HSYC_FRONT_PORCH   48
+#define EXAMPLE_LCD_HSYC_PLUS_WIDTH    40
+#define EXAMPLE_LCD_VSYC_BACK_PORCH    32
+#define EXAMPLE_LCD_VSYC_FRONT_PORCH   13
+#define EXAMPLE_LCD_VSYC_PLUS_WIDTH    23
 #define EXAMPLE_LCD_PCLK_ACTIVE_NEG    true
 #define EXAMPLE_PIN_NUM_BK_LIGHT       4
 #define EXAMPLE_PIN_NUM_HSYNC          46
@@ -83,6 +89,17 @@ static bool example_on_vsync_event(esp_lcd_panel_handle_t panel, const esp_lcd_r
 
 static void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
 {
+#if CONFIG_EXAMPLE_AVOID_TEAR_WITH_SYNC_FLUSH_CRITICAL
+    static int area_index = 0;
+    if (area_index == 0) {
+        xSemaphoreTake(trans_ready, portMAX_DELAY);
+    }
+    area_index++;
+    if (lv_disp_flush_is_last(drv)) {
+        area_index = 0;
+    }
+#endif
+
     esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t) drv->user_data;
     int offsetx1 = area->x1;
     int offsetx2 = area->x2;
@@ -92,10 +109,11 @@ static void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_
     esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, color_map);
 
 #if CONFIG_EXAMPLE_AVOID_TEAR_WITH_SYNC_FLUSH
-    /* Check whether current area is last one */
     if (lv_disp_flush_is_last(drv)) {
-        xSemaphoreTake(flush_end, portMAX_DELAY);               // Wait until rgb lcd vsync finish
-        esp_lcd_rgb_panel_start_transmission(panel_handle);     // Manually start rgb lcd transmission
+#if !CONFIG_EXAMPLE_AVOID_TEAR_WITH_SYNC_FLUSH_CRITICAL
+        xSemaphoreTake(flush_end, portMAX_DELAY);
+#endif
+        esp_lcd_rgb_panel_start_transmission(panel_handle);
     }
 #endif
 
@@ -251,14 +269,20 @@ void app_main(void)
         // The task running lv_task_handler should have lower priority than that running `lv_tick_inc`
         lv_task_handler();
 #if CONFIG_EXAMPLE_AVOID_TEAR_WITH_SYNC_FLUSH
-        if (xSemaphoreTake(flush_end, 0) == pdTRUE) {
-            if (xSemaphoreTake(trans_ready, 0) == pdTRUE) {
-                esp_lcd_rgb_panel_start_transmission(panel_handle);
-            }
-            else {
-                xSemaphoreGive(flush_end);
-            }
+#if CONFIG_EXAMPLE_AVOID_TEAR_WITH_SYNC_FLUSH_CRITICAL
+    if (xSemaphoreTake(trans_ready, 0) == pdTRUE) {
+        esp_lcd_rgb_panel_start_transmission(panel_handle);
+    }
+#else
+    if (xSemaphoreTake(flush_end, 0) == pdTRUE) {
+        if (xSemaphoreTake(trans_ready, 0) == pdTRUE) {
+            esp_lcd_rgb_panel_start_transmission(panel_handle);
         }
+        else {
+            xSemaphoreGive(flush_end);
+        }
+    }
+#endif
 #endif
     }
 }

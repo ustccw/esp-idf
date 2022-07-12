@@ -5,8 +5,11 @@
 
 [esp_lcd](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/lcd.html) supports RGB interfaced LCD panel, with one or two frame buffer(s) managed by the driver itself.
 
-This example shows the general process of installing an RGB panel driver, and displays a scatter chart on the screen based on the LVGL library. For more information about porting the LVGL library, please refer to [official porting guide](https://docs.lvgl.io/master/porting/index.html). This example uses a synchronization scheme with two semaphores to solve the tearing problem:
+This example shows the general process of installing an RGB panel driver, and displays a scatter chart on the screen based on the LVGL library. For more information about porting the LVGL library, please refer to [official porting guide](https://docs.lvgl.io/master/porting/index.html). This example uses two synchronization schemes with two semaphores(*flush_end, trans_ready*) to solve the tearing problem:
+**[Tearing fix:]**
 ![synchronization scheme](./tearing_fix.png)
+**[Tearing fix critical:]**
+![synchronization scheme](./tearing_fix_critical.png)
 
 ## How to use the example
 
@@ -56,7 +59,8 @@ Run `idf.py menuconfig` and go to `Example Configuration`:
 
 1. Choose whether to `Use double Frame Buffer`
 2. Choose whether to `Avoid tearing effect` (available only when step `1` was chosen to false)
-3. Choose whether to `Use bounce buffer` (available only when step `1` was chosen to false)
+3. Choose whether to `Avoid tearing effect critically` (available only when step `2` was chosen to true)
+4. Choose whether to `Use bounce buffer` (available only when step `1` was chosen to false)
 
 ### Build and Flash
 
